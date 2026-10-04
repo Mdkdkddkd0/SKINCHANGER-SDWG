@@ -964,7 +964,9 @@ end
 local function cleanup(slot)
     local st = state[slot]; if not st then return end
     if st.chroma then pcall(function() st.chroma:Disconnect() end) end
+    if st.chromaTool then pcall(function() st.chromaTool:Disconnect() end) end
     if st.overlay then pcall(function() st.overlay:Destroy() end) end
+    if st.overlayTool then pcall(function() st.overlayTool:Destroy() end) end
     restore(st.hidden)
     state[slot] = nil
 end
@@ -979,33 +981,69 @@ local function apply(slot, name)
     if not data then lastApplied[slot] = name; return end
     lastApplied[slot] = name
 
+    -- DisplayRef (инвентарь/спина)
     local base = displayValue(slot) or waitDisplay(slot, 1.5)
-    if token[slot] ~= myToken then return end
-    if not base then
+
+    -- Tool (в руках)
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChild(slot)
+    local toolHandle = tool and tool:FindFirstChild('Handle')
+
+    if not base and not toolHandle then
         if setStatus then setStatus('No ' .. slot .. ' shown.', Color3.fromRGB(240,200,120)) end
         return
     end
 
-    local hidden = {}
-    hideInto(hidden, base)
-    for _, d in ipairs(base:GetDescendants()) do hideInto(hidden, d) end
+    if token[slot] ~= myToken then return end
 
-    local built = buildAnyOverlay(data)
-    if not built or not built.root or token[slot] ~= myToken or not base.Parent then
-        restore(hidden)
-        if built and built.root then built.root:Destroy() end
-        return
+    local hidden = {}
+
+    -- Спрятать оригиналы
+    if base then
+        hideInto(hidden, base)
+        for _, d in ipairs(base:GetDescendants()) do hideInto(hidden, d) end
+    end
+    if toolHandle then
+        hideInto(hidden, toolHandle)
+        for _, d in ipairs(toolHandle:GetDescendants()) do hideInto(hidden, d) end
     end
 
-    finalizeOverlay(built, base.CFrame, data)
-    local overlay = built.root
-    overlay.Parent = base.Parent or base
+    -- Оверлей 1 — на DisplayRef
+    local overlayDisplay
+    if base and base.Parent then
+        local built = buildAnyOverlay(data)
+        if built and built.root then
+            finalizeOverlay(built, base.CFrame, data)
+            overlayDisplay = built.root
+            overlayDisplay.Parent = base.Parent or base
+            local w = Instance.new('WeldConstraint')
+            w.Part0 = overlayDisplay; w.Part1 = base; w.Parent = overlayDisplay
+        end
+    end
 
-    local w = Instance.new('WeldConstraint')
-    w.Part0 = overlay; w.Part1 = base; w.Parent = overlay
+    -- Оверлей 2 — на Tool
+    local overlayTool
+    if toolHandle and tool then
+        local built2 = buildAnyOverlay(data)
+        if built2 and built2.root then
+            finalizeOverlay(built2, toolHandle.CFrame, data)
+            overlayTool = built2.root
+            overlayTool.Parent = tool
+            local w = Instance.new('WeldConstraint')
+            w.Part0 = overlayTool; w.Part1 = toolHandle; w.Parent = overlayTool
+        end
+    end
 
-    local chroma = isChroma(name, data) and startChroma(overlay) or nil
-    state[slot] = { overlay = overlay, hidden = hidden, chroma = chroma }
+    local chroma1 = overlayDisplay and isChroma(name, data) and startChroma(overlayDisplay) or nil
+    local chroma2 = overlayTool and isChroma(name, data) and startChroma(overlayTool) or nil
+
+    state[slot] = {
+        overlay = overlayDisplay,
+        overlayTool = overlayTool,
+        hidden = hidden,
+        chroma = chroma1,
+        chromaTool = chroma2,
+    }
 
     if setStatus then
         setStatus('Showing: ' .. name .. ' (' .. slot .. ')', Color3.fromRGB(150,230,170))
@@ -1173,7 +1211,30 @@ table.insert(SELF.conns, LocalPlayer.CharacterAdded:Connect(function()
         end
     end)
 end))
+-- Следим за Tool: когда берёшь в руки — переприменяем скин
+table.insert(SELF.conns, LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(1)
+    table.insert(SELF.conns, char.ChildAdded:Connect(function(child)
+        if child:IsA('Tool') and (child.Name == 'Knife' or child.Name == 'Gun') then
+            task.wait(0.2)
+            if lastApplied[child.Name] then
+                task.spawn(function() apply(child.Name, lastApplied[child.Name]) end)
+            end
+        end
+    end))
+end))
 
+-- Следим за текущим Character (если уже есть)
+if LocalPlayer.Character then
+    table.insert(SELF.conns, LocalPlayer.Character.ChildAdded:Connect(function(child)
+        if child:IsA('Tool') and (child.Name == 'Knife' or child.Name == 'Gun') then
+            task.wait(0.2)
+            if lastApplied[child.Name] then
+                task.spawn(function() apply(child.Name, lastApplied[child.Name]) end)
+            end
+        end
+    end))
+end
 SELF.destroy = function()
     for _, cn in ipairs(SELF.conns) do pcall(function() cn:Disconnect() end) end
     for slot in pairs(state) do pcall(cleanup, slot) end
